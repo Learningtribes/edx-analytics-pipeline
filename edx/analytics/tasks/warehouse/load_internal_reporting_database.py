@@ -44,9 +44,9 @@ class MysqlToWarehouseTaskMixin(WarehouseMixin):
         config_path={'section': 'database-import', 'name': 'database'}
     )
 
-    def should_exclude_field(self, field_name):
+    def should_exclude_field(self, table_name, field_name):
         """Determines whether to exclude an individual field during the import, matching against 'table.field'."""
-        full_name = "{}.{}".format(self.table_name, field_name)
+        full_name = "{}.{}".format(table_name, field_name)
         if any(re.match(pattern, full_name) for pattern in self.exclude_field):
             return True
         return False
@@ -82,6 +82,8 @@ class MysqlToVerticaTaskMixin(MysqlToWarehouseTaskMixin):
     Parameters for importing a mysql database into Vertica.
     """
 
+    # Don't use the same source for BigQuery loads as was used for Vertica loads,
+    # until their formats and exclude-field parameters match.
     warehouse_subdirectory = luigi.Parameter(
         default='import_mysql_to_vertica',
         description='Subdirectory under warehouse_path to store intermediate data.'
@@ -101,7 +103,6 @@ class LoadMysqlToVerticaTableTask(MysqlToVerticaTaskMixin, VerticaCopyTask):
         super(LoadMysqlToVerticaTableTask, self).__init__(*args, **kwargs)
         self.table_schema = []
         self.deleted_fields = []
-        self.undeleted_fields = []
 
     def requires(self):
         if self.required_tasks is None:
@@ -136,10 +137,9 @@ class LoadMysqlToVerticaTableTask(MysqlToVerticaTaskMixin, VerticaCopyTask):
                 if field_null == "NO":
                     field_type = field_type + " NOT NULL"
 
-                if self.should_exclude_field(field_name):
+                if self.should_exclude_field(self.table_name, field_name):
                     self.deleted_fields.append(field_name)
                 else:
-                    self.undeleted_fields.append(field_name)
                     field_name = "\"{}\"".format(field_name)
                     self.table_schema.append((field_name, field_type))
 
@@ -162,6 +162,9 @@ class LoadMysqlToVerticaTableTask(MysqlToVerticaTaskMixin, VerticaCopyTask):
 
     @property
     def insert_source_task(self):
+        # Get the columns to request from Sqoop, as a side effect of
+        # getting the Vertica columns. The latter are quoted, so strip the quotes off.
+        column_names = [name[1:-1] for (name, _) in self.columns]
         partition_path_spec = HivePartition('dt', self.date.isoformat()).path_spec
         destination = url_path_join(
             self.warehouse_path,
@@ -181,7 +184,7 @@ class LoadMysqlToVerticaTableTask(MysqlToVerticaTaskMixin, VerticaCopyTask):
             null_string=self.null_marker,
             delimiter_replacement=' ',
             direct=False,
-            columns=self.undeleted_fields,
+            columns=column_names,
         )
 
     @property
@@ -314,10 +317,12 @@ class ImportMysqlToVerticaTask(MysqlToVerticaTaskMixin, luigi.WrapperTask):
                     db_credentials=self.db_credentials,
                     database=self.database,
                     warehouse_path=self.warehouse_path,
+                    warehouse_subdirectory=self.warehouse_subdirectory,
                     table_name=table_name,
                     overwrite=self.overwrite,
                     date=self.date,
                     marker_schema=self.marker_schema,
+                    exclude_field=self.exclude_field,
                 )
 
         yield PostImportDatabaseTask(
@@ -387,7 +392,8 @@ class MysqlToBigQueryTaskMixin(MysqlToWarehouseTaskMixin):
     Parameters for importing a mysql database into BigQuery.
     """
 
-    # Don't use the same source for BigQuery loads as was used for Vertica loads, until their formats match.
+    # Don't use the same source for BigQuery loads as was used for Vertica loads,
+    # until their formats and exclude-field parameters match.
     warehouse_subdirectory = luigi.Parameter(
         default='import_mysql_to_bq',
         description='Subdirectory under warehouse_path to store intermediate data.'
@@ -427,7 +433,7 @@ class LoadMysqlToBigQueryTableTask(MysqlToBigQueryTaskMixin, BigQueryLoadTask):
                 mode = 'REQUIRED' if field_null == 'NO' else 'NULLABLE'
                 description = ''
 
-                if self.should_exclude_field(field_name):
+                if self.should_exclude_field(self.table_name, field_name):
                     self.deleted_fields.append(field_name)
                 else:
                     self.table_schema.append(SchemaField(field_name, bigquery_type, description=description, mode=mode))
@@ -490,10 +496,6 @@ class ImportMysqlDatabaseToBigQueryDatasetTask(MysqlToBigQueryTaskMixin, BigQuer
     exclude = luigi.ListParameter(
         default=(),
         description='List of regular expressions matching database table names that should not be imported from MySQL to BigQuery.'
-    )
-    exclude_field = luigi.ListParameter(
-        default=(),
-        description='List of regular expression patterns for matching "tablename.fieldname" fields that should not be output.',
     )
 
     def __init__(self, *args, **kwargs):
