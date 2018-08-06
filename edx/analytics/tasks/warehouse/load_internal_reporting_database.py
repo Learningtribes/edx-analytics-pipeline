@@ -68,14 +68,6 @@ class MysqlToWarehouseTaskMixin(WarehouseMixin):
         # and "NULL" will always be output.  Use the same for Vertica and BigQuery.
         return 'NNULLL'
 
-    @property
-    def quote_character(self):
-        # BigQuery does not handle escaping of quotes.  It hews to a narrower standard for CSV
-        # input, which expects quote characters to be doubled as a way of escaping them.
-        # We therefore have to avoid escaping quotes by selecting delimiters and null markers
-        # so they won't appear in field values at all.  Use the same for Vertica and BigQuery.
-        return ''
-
 
 class MysqlToVerticaTaskMixin(MysqlToWarehouseTaskMixin):
     """
@@ -157,8 +149,12 @@ class LoadMysqlToVerticaTableTask(MysqlToVerticaTaskMixin, VerticaCopyTask):
 
     @property
     def enclosed_by(self):
-        # Hopefully, setting this to a zero-length string will disable this.
-        return "''"
+        # Vertica does not handle fields that end in backslashes.  Therefore, such
+        # backslashes end up escaping the character that follows them, which is the
+        # delimiter, and results in the delimiter no longer being treated as a delimiter.
+        # As a result, this value is different for Vertica and BigQuery.
+        # BigQuery value: return "''"  means that no enclosure is enabled.
+        return "''''"
 
     @property
     def insert_source_task(self):
@@ -173,6 +169,15 @@ class LoadMysqlToVerticaTableTask(MysqlToVerticaTaskMixin, VerticaCopyTask):
             self.table_name,
             partition_path_spec
         ) + '/'
+        # The old format used mysql_delimiters (and direct mode).   Removing direct mode
+        # gives us more choices for other settings.   We cahnge null_string and field termination.
+        # But mysql's delimiters also included:   escaped-by: \ optionally-enclosed-by: '
+        # Presumably --lines-terminated-by \n  is the default regardless.
+        # The Vertica Sqoop export hard-coded the optionally-enclosed-by option.
+        # We should generalize it.
+        # Can we use:  --hive-delims-replacement or --hive-drop-import-delims ???
+        # Actually --hive-delims-replacement is set by delimiter_replacement below.
+        # And we set --null-string, --null-non-string, and --fields-terminated-by as well.
         return SqoopImportFromMysql(
             table_name=self.table_name,
             credentials=self.db_credentials,
@@ -185,6 +190,8 @@ class LoadMysqlToVerticaTableTask(MysqlToVerticaTaskMixin, VerticaCopyTask):
             delimiter_replacement=' ',
             direct=False,
             columns=column_names,
+            optionally_enclosed_by='\'',
+            escaped_by='\\',
         )
 
     @property
@@ -398,6 +405,14 @@ class MysqlToBigQueryTaskMixin(MysqlToWarehouseTaskMixin):
         default='import_mysql_to_bq',
         description='Subdirectory under warehouse_path to store intermediate data.'
     )
+
+    @property
+    def quote_character(self):
+        # BigQuery does not handle escaping of quotes.  It hews to a narrower standard for CSV
+        # input, which expects quote characters to be doubled as a way of escaping them.
+        # We therefore have to avoid escaping quotes by selecting delimiters and null markers
+        # so they won't appear in field values at all.  Not the same for Vertica and BigQuery!
+        return ''
 
 
 class LoadMysqlToBigQueryTableTask(MysqlToBigQueryTaskMixin, BigQueryLoadTask):
