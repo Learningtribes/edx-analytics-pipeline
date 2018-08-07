@@ -68,6 +68,11 @@ class MysqlToWarehouseTaskMixin(WarehouseMixin):
         # and "NULL" will always be output.  Use the same for Vertica and BigQuery.
         return 'NNULLL'
 
+    @property
+    def enclosed_by(self):
+        """The character used to enclose field values to treat as literal when they contain special characters.  Default is none."""
+        return ''
+
 
 class MysqlToVerticaTaskMixin(MysqlToWarehouseTaskMixin):
     """
@@ -148,13 +153,19 @@ class LoadMysqlToVerticaTableTask(MysqlToVerticaTaskMixin, VerticaCopyTask):
         return "'{}'".format(self.null_marker)
 
     @property
-    def enclosed_by(self):
-        # Vertica does not handle fields that end in backslashes.  Therefore, such
-        # backslashes end up escaping the character that follows them, which is the
-        # delimiter, and results in the delimiter no longer being treated as a delimiter.
-        # As a result, this value is different for Vertica and BigQuery.
-        # BigQuery value: return "''"  means that no enclosure is enabled.
-        return "''''"
+    def copy_enclosed_by(self):
+        """The field's enclosing character. Default is empty string."""
+        return "'{}'".format(self.enclosed_by)
+
+    @property
+    def copy_escape_spec(self):
+        """
+        The escape character to use to have special characters be treated literally.
+
+        Copy's default is backslash if this is a zero-length string.   To disable escaping,
+        use "NO ESCAPE".  To use a different character, use "ESCAPE AS 'char'".
+        """
+        return "NO ESCAPE"
 
     @property
     def insert_source_task(self):
@@ -170,7 +181,7 @@ class LoadMysqlToVerticaTableTask(MysqlToVerticaTaskMixin, VerticaCopyTask):
             partition_path_spec
         ) + '/'
         # The old format used mysql_delimiters (and direct mode).   Removing direct mode
-        # gives us more choices for other settings.   We cahnge null_string and field termination.
+        # gives us more choices for other settings.   We change null_string and field termination.
         # But mysql's delimiters also included:   escaped-by: \ optionally-enclosed-by: '
         # Presumably --lines-terminated-by \n  is the default regardless.
         # The Vertica Sqoop export hard-coded the optionally-enclosed-by option.
@@ -178,6 +189,7 @@ class LoadMysqlToVerticaTableTask(MysqlToVerticaTaskMixin, VerticaCopyTask):
         # Can we use:  --hive-delims-replacement or --hive-drop-import-delims ???
         # Actually --hive-delims-replacement is set by delimiter_replacement below.
         # And we set --null-string, --null-non-string, and --fields-terminated-by as well.
+        # Try with NO ESCAPE, and no enclosing or escaping, and see if that works.
         return SqoopImportFromMysql(
             table_name=self.table_name,
             credentials=self.db_credentials,
@@ -190,8 +202,8 @@ class LoadMysqlToVerticaTableTask(MysqlToVerticaTaskMixin, VerticaCopyTask):
             delimiter_replacement=' ',
             direct=False,
             columns=column_names,
-            optionally_enclosed_by='\'',
-            escaped_by='\\',
+            # optionally_enclosed_by='\'',
+            # escaped_by='\\',
         )
 
     @property
